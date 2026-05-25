@@ -1,59 +1,40 @@
-name: Build XNU Kernel
+name: Build XNU
 
 on:
-  workflow_dispatch:
   push:
+  workflow_dispatch:
 
 jobs:
-  build-xnu:
+  build:
     runs-on: macos-14
 
     env:
-      ARCH_CONFIGS: X86_64
-      KERNEL_CONFIGS: DEVELOPMENT
-      BUILD_LTO: "0"
-      RC_DARWIN_KERNEL_VERSION: "26.0.0"
-      MAKEJOBS: "4"
+      RC_DARWIN_KERNEL_VERSION: "26.0"
+      SDKROOT: /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew install bash make coreutils
+      - name: Say hi, for no reason ✌️🥹
+        run: echo hi vrochacho, hope this works twin.
 
-      - name: Select Xcode + SDK
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Verify toolchain
         run: |
-          sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer || true
           xcodebuild -version
-          SDK=$(xcrun --sdk macosx --show-sdk-path)
-          echo "SDKROOT=$SDK" >> $GITHUB_ENV
+          clang --version
+          make --version
 
-      - name: Clone XNU
-        run: |
-          git clone https://github.com/apple-oss-distributions/xnu.git
-          cd xnu
-          git submodule update --init --recursive || true
-
-      - name: Build XNU
+      - name: Build XNU (bootstrap only)
         run: |
           cd xnu
-
-          make \
-            SDKROOT="$SDKROOT" \
-            ARCH_CONFIGS="$ARCH_CONFIGS" \
-            KERNEL_CONFIGS="$KERNEL_CONFIGS" \
-            BUILD_LTO="$BUILD_LTO" \
-            MAKEJOBS="$MAKEJOBS" \
-            RC_DARWIN_KERNEL_VERSION="$RC_DARWIN_KERNEL_VERSION" \
-            SYSCTL_HW_PHYSICALCPU=$(sysctl -n hw.physicalcpu) \
-            SYSCTL_HW_LOGICALCPU=$(sysctl -n hw.logicalcpu) \
-            VERBOSE=YES 2>&1 | tee build.log
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xnu-build-log
-          path: xnu/build.log
+          unset MAKEFLAGS
+          make clean || true
+          make -j$(sysctl -n hw.ncpu) \
+            RC_DARWIN_KERNEL_VERSION=${RC_DARWIN_KERNEL_VERSION} \
+            SDKROOT=${SDKROOT} \
+            ARCH_CONFIGS=X86_64 \
+            KERNEL_CONFIGS=DEVELOPMENT
