@@ -1,40 +1,85 @@
-name: Build XNU
+name: Build XNU Kernel
 
 on:
-  push:
   workflow_dispatch:
+  push:
 
 jobs:
-  build:
+  build-xnu:
     runs-on: macos-14
 
     env:
+      # REQUIRED by XNU or it dies instantly
       RC_DARWIN_KERNEL_VERSION: "26.0"
-      SDKROOT: /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+
+      # Force correct SDK selection
+      SDKROOT: /Applications/Xcode_15.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+
+      # Keep build stable
+      ARCH_CONFIGS: X86_64
+      KERNEL_CONFIGS: DEVELOPMENT
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Say hi, for no reason ✌️🥹
-        run: echo hi vrochacho, hope this works twin.
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
-      - name: Verify toolchain
+      - name: yo twin, gl vro
+        run: echo gl twin.
+      # IMPORTANT: fix your earlier "cd xnu: not found"
+      - name: Locate XNU directory safely
         run: |
+          echo "Repo root:"
+          pwd
+          ls -la
+
+          # If xnu is root repo:
+          if [ -f Makefile ] && [ -d makedefs ]; then
+            echo "XNU is root repo"
+            echo "XNU_DIR=." >> $GITHUB_ENV
+          fi
+
+          # If xnu is subfolder:
+          if [ -d xnu ]; then
+            echo "XNU_DIR=xnu" >> $GITHUB_ENV
+          fi
+
+      - name: Select Xcode toolchain
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
           xcodebuild -version
           clang --version
           make --version
 
-      - name: Build XNU (bootstrap only)
+      - name: Clean environment (CRITICAL FIX)
         run: |
-          cd xnu
-          unset MAKEFLAGS
+          unset MAKEFLAGS || true
+          unset CFLAGS || true
+          unset CXXFLAGS || true
+          unset LDFLAGS || true
+
+      - name: Verify XNU layout
+        run: |
+          echo "Using XNU_DIR=$XNU_DIR"
+          ls -la $XNU_DIR
+
+      - name: Build XNU (bootstrap stage first)
+        working-directory: ${{ env.XNU_DIR }}
+        run: |
           make clean || true
+
           make -j$(sysctl -n hw.ncpu) \
-            RC_DARWIN_KERNEL_VERSION=${RC_DARWIN_KERNEL_VERSION} \
-            SDKROOT=${SDKROOT} \
-            ARCH_CONFIGS=X86_64 \
-            KERNEL_CONFIGS=DEVELOPMENT
+            SDKROOT="${SDKROOT}" \
+            RC_DARWIN_KERNEL_VERSION="${RC_DARWIN_KERNEL_VERSION}" \
+            ARCH_CONFIGS="${ARCH_CONFIGS}" \
+            KERNEL_CONFIGS="${KERNEL_CONFIGS}" \
+            BUILD_LTO=0
+
+      - name: Upload build logs if failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xnu-build-logs
+          path: |
+            **/*.log
+            **/build/**/*.log
+        
