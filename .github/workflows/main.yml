@@ -1,26 +1,59 @@
-name: Build XNU
+name: Build XNU Kernel
 
 on:
   workflow_dispatch:
+  push:
 
 jobs:
-  build:
+  build-xnu:
     runs-on: macos-14
 
+    env:
+      ARCH_CONFIGS: X86_64
+      KERNEL_CONFIGS: DEVELOPMENT
+      BUILD_LTO: "0"
+      RC_DARWIN_KERNEL_VERSION: "26.0.0"
+      MAKEJOBS: "4"
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
-          brew install make bash coreutils
+          brew install bash make coreutils
+
+      - name: Select Xcode + SDK
+        run: |
+          sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer || true
+          xcodebuild -version
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          echo "SDKROOT=$SDK" >> $GITHUB_ENV
 
       - name: Clone XNU
         run: |
           git clone https://github.com/apple-oss-distributions/xnu.git
           cd xnu
+          git submodule update --init --recursive || true
 
       - name: Build XNU
         run: |
           cd xnu
-          make SDKROOT=$(xcrun --sdk macosx --show-sdk-path) ARCH_CONFIGS=X86_64 KERNEL_CONFIGS=DEVELOPMENT
+
+          make \
+            SDKROOT="$SDKROOT" \
+            ARCH_CONFIGS="$ARCH_CONFIGS" \
+            KERNEL_CONFIGS="$KERNEL_CONFIGS" \
+            BUILD_LTO="$BUILD_LTO" \
+            MAKEJOBS="$MAKEJOBS" \
+            RC_DARWIN_KERNEL_VERSION="$RC_DARWIN_KERNEL_VERSION" \
+            SYSCTL_HW_PHYSICALCPU=$(sysctl -n hw.physicalcpu) \
+            SYSCTL_HW_LOGICALCPU=$(sysctl -n hw.logicalcpu) \
+            VERBOSE=YES 2>&1 | tee build.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xnu-build-log
+          path: xnu/build.log
