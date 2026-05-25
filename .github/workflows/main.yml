@@ -3,83 +3,203 @@ name: Build XNU Kernel
 on:
   workflow_dispatch:
   push:
+  pull_request:
+
+concurrency:
+  group: xnu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-xnu:
+  build:
     runs-on: macos-14
+    timeout-minutes: 180
 
     env:
-      # REQUIRED by XNU or it dies instantly
-      RC_DARWIN_KERNEL_VERSION: "26.0"
-
-      # Force correct SDK selection
-      SDKROOT: /Applications/Xcode_15.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-
-      # Keep build stable
       ARCH_CONFIGS: X86_64
       KERNEL_CONFIGS: DEVELOPMENT
+      RC_DARWIN_KERNEL_VERSION: "26.0"
+      BUILD_LTO: "0"
+      MAKEFLAGS: ""
+      MFLAGS: ""
+      MAKEOVERRIDES: ""
+      LC_ALL: C
+      LANG: C
+      XNU_LOG_DIR: ${{ github.workspace }}/ci-logs
+      XNU_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: yo twin, gl vro
-        run: echo gl twin.
-      # IMPORTANT: fix your earlier "cd xnu: not found"
-      - name: Locate XNU directory safely
+      - name: Verify repository root
         run: |
-          echo "Repo root:"
-          pwd
-          ls -la
-
-          # If xnu is root repo:
-          if [ -f Makefile ] && [ -d makedefs ]; then
-            echo "XNU is root repo"
-            echo "XNU_DIR=." >> $GITHUB_ENV
+          set -euo pipefail
+          if [[ ! -f Makefile || ! -d makedefs || ! -d osfmk || ! -d bsd || ! -d libkern ]]; then
+            echo "::error::This workflow must run in the XNU repository root."
+            echo "pwd=$(pwd)"
+            echo "top-level files:"
+            ls -la
+            exit 1
           fi
 
-          # If xnu is subfolder:
-          if [ -d xnu ]; then
-            echo "XNU_DIR=xnu" >> $GITHUB_ENV
+          mkdir -p "$XNU_LOG_DIR" "$XNU_ARTIFACT_DIR"
+
+          {
+            echo "=== repo root ==="
+            pwd
+            echo "=== top-level tree ==="
+            find . -maxdepth 2 -mindepth 1 -print | sort
+          } | tee "$XNU_LOG_DIR/repo-layout.txt"
+
+      - name: Select Xcode and capture toolchain info
+        run: |
+          set -euo pipefail
+
+          XCODE_APP="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' | sort | tail -n 1 || true)"
+          if [[ -z "${XCODE_APP:-}" || ! -d "$XCODE_APP/Contents/Developer" ]]; then
+            echo "::error::No Xcode.app found under /Applications."
+            ls -la /Applications || true
+            exit 1
           fi
 
-      - name: Select Xcode toolchain
+          echo "Using Xcode app: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+
+          {
+            echo "=== sw_vers ==="
+            sw_vers
+            echo
+            echo "=== uname -a ==="
+            uname -a
+            echo
+            echo "=== xcodebuild -version ==="
+            xcodebuild -version
+            echo
+            echo "=== xcode-select -p ==="
+            xcode-select -p
+            echo
+            echo "=== xcodebuild -showsdks ==="
+            xcodebuild -showsdks
+            echo
+            echo "=== xcrun --sdk macosx --show-sdk-path ==="
+            xcrun --sdk macosx --show-sdk-path
+            echo
+            echo "=== tool lookups ==="
+            xcrun --find clang
+            xcrun --find clang++
+            xcrun --find cc
+            xcrun --find c++
+            xcrun --find codesign_allocate
+            xcrun --find plutil
+            xcrun --find mig || true
+            xcrun --find kextcache || true
+            xcrun --find kmutil || true
+          } | tee "$XNU_LOG_DIR/toolchain.txt"
+
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: Print XNU build inputs
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-          xcodebuild -version
-          clang --version
-          make --version
+          set -euo pipefail
+          {
+            echo "ARCH_CONFIGS=$ARCH_CONFIGS"
+            echo "KERNEL_CONFIGS=$KERNEL_CONFIGS"
+            echo "RC_DARWIN_KERNEL_VERSION=$RC_DARWIN_KERNEL_VERSION"
+            echo "BUILD_LTO=$BUILD_LTO"
+            echo "SDKROOT=$SDKROOT"
+            echo "DEVELOPER_DIR=${DEVELOPER_DIR:-}"
+            echo "MAKEFLAGS=${MAKEFLAGS:-}"
+            echo "MFLAGS=${MFLAGS:-}"
+            echo "MAKEOVERRIDES=${MAKEOVERRIDES:-}"
+          } | tee "$XNU_LOG_DIR/build-inputs.txt"
 
-      - name: Clean environment (CRITICAL FIX)
+      - name: Dry run the XNU make graph
         run: |
-          unset MAKEFLAGS || true
-          unset CFLAGS || true
-          unset CXXFLAGS || true
-          unset LDFLAGS || true
+          set -Eeuo pipefail
+          unset MAKEFLAGS MFLAGS MAKEOVERRIDES || true
 
-      - name: Verify XNU layout
+          trap 'status=$?; echo "::group::Dry-run diagnostics"; \
+                echo "tail of dry run log:"; tail -n 200 "$XNU_LOG_DIR/make-dry-run.log" || true; \
+                echo "current build inputs:"; cat "$XNU_LOG_DIR/build-inputs.txt" || true; \
+                echo "current toolchain info:"; tail -n 120 "$XNU_LOG_DIR/toolchain.txt" || true; \
+                echo "::endgroup::"; exit $status' ERR
+
+          make -n -w \
+            SDKROOT="$SDKROOT" \
+            ARCH_CONFIGS="$ARCH_CONFIGS" \
+            KERNEL_CONFIGS="$KERNEL_CONFIGS" \
+            BUILD_LTO="$BUILD_LTO" \
+            RC_DARWIN_KERNEL_VERSION="$RC_DARWIN_KERNEL_VERSION" \
+            VERBOSE=YES \
+            2>&1 | tee "$XNU_LOG_DIR/make-dry-run.log"
+
+      - name: Build XNU
         run: |
-          echo "Using XNU_DIR=$XNU_DIR"
-          ls -la $XNU_DIR
+          set -Eeuo pipefail
+          unset MAKEFLAGS MFLAGS MAKEOVERRIDES || true
 
-      - name: Build XNU (bootstrap stage first)
-        working-directory: ${{ env.XNU_DIR }}
+          jobs="$(sysctl -n hw.ncpu)"
+          echo "Parallel jobs: $jobs"
+
+          trap 'status=$?; echo "::group::Build diagnostics"; \
+                echo "tail of build log:"; tail -n 300 "$XNU_LOG_DIR/make-build.log" || true; \
+                echo "tail of dry run log:"; tail -n 120 "$XNU_LOG_DIR/make-dry-run.log" || true; \
+                echo "current environment snapshot:"; env | sort | sed -n "1,220p" || true; \
+                echo "::endgroup::"; exit $status' ERR
+
+          make -w -j"$jobs" \
+            SDKROOT="$SDKROOT" \
+            ARCH_CONFIGS="$ARCH_CONFIGS" \
+            KERNEL_CONFIGS="$KERNEL_CONFIGS" \
+            BUILD_LTO="$BUILD_LTO" \
+            RC_DARWIN_KERNEL_VERSION="$RC_DARWIN_KERNEL_VERSION" \
+            VERBOSE=YES \
+            2>&1 | tee "$XNU_LOG_DIR/make-build.log"
+
+      - name: Collect build outputs
+        if: always()
         run: |
-          make clean || true
+          set -euo pipefail
 
-          make -j$(sysctl -n hw.ncpu) \
-            SDKROOT="${SDKROOT}" \
-            RC_DARWIN_KERNEL_VERSION="${RC_DARWIN_KERNEL_VERSION}" \
-            ARCH_CONFIGS="${ARCH_CONFIGS}" \
-            KERNEL_CONFIGS="${KERNEL_CONFIGS}" \
-            BUILD_LTO=0
+          mkdir -p "$XNU_ARTIFACT_DIR"
 
-      - name: Upload build logs if failure
-        if: failure()
+          {
+            echo "=== files of interest ==="
+            find . -type f \( \
+              -name 'kernel.development' -o \
+              -name 'kernel.release' -o \
+              -name 'kernel.debug' -o \
+              -name 'kernel.*.unstripped' -o \
+              -name '*.log' \
+            ) | sort
+          } | tee "$XNU_LOG_DIR/file-index.txt"
+
+          rm -f "$XNU_ARTIFACT_DIR"/* || true
+
+          while IFS= read -r file; do
+            base="$(basename "$file")"
+            cp -f "$file" "$XNU_ARTIFACT_DIR/$base"
+          done < <(find . -type f \( \
+              -name 'kernel.development' -o \
+              -name 'kernel.release' -o \
+              -name 'kernel.debug' -o \
+              -name 'kernel.*.unstripped' \
+            ) | sort)
+
+          if compgen -G "$XNU_ARTIFACT_DIR/*" > /dev/null; then
+            (
+              cd "$XNU_ARTIFACT_DIR"
+              shasum -a 256 * > SHA256SUMS.txt
+            )
+          fi
+
+      - name: Upload logs and artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xnu-build-logs
+          name: xnu-build-${{ github.run_id }}
           path: |
-            **/*.log
-            **/build/**/*.log
-        
+            ci-logs/**
+            ci-artifacts/**
+          if-no-files-found: warn
