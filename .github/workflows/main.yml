@@ -1,0 +1,26 @@
+name: Build XNU
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install make bash coreutils
+
+      - name: Clone XNU
+        run: |
+          git clone https://github.com/apple-oss-distributions/xnu.git
+          cd xnu
+
+      - name: Build XNU
+        run: |
+          cd xnu
+          make SDKROOT=$(xcrun --sdk macosx --show-sdk-path) ARCH_CONFIGS=X86_64 KERNEL_CONFIGS=DEVELOPMENT
